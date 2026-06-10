@@ -1,4 +1,4 @@
-from IDQN.experience_replay import ReplayMemory # run this from repo root
+from src.IDQN.experience_replay import ReplayMemory
 import random
 
 if __name__ == '__main__':
