@@ -5,16 +5,22 @@ How do we do this?
 - Create env
 discrete space
 Extension later: vectorized envs
+extensions: dueling and double dqn
+extensoin: parameter sharing
 parallel envs bc this is not a turn based game
+
 - Create single agent DQN
 Because I-DQN runs a standard DQN for each agent, the core algorithm remains the same for every independent learner.
+
 You need to instantiate the following for each agent:
 Q-Network: A neural network that maps a state vector to Q-values for all available actions.
 Target Network: A slowly updated copy of the Q-Network to stabilize training.
 Optimizer: e.g., Adam or RMSprop.
 Experience Replay Buffer: Stores transitions \((state, action, reward, next\_state)\)
+
 - Choose the Action Strategy (Epsilon-Greedy)
 At each step, all agents independently decide their next action using an ε-greedy policy to balance exploration and exploitation.
+
 - Core loop
 Observe: Each agent i observes its current local state \(s_{i}\).
 Act: Each agent selects an action \(a_{i}\) independently using ε-greedy.
@@ -43,6 +49,11 @@ Scalability: The architecture becomes increasingly complex as the number of agen
 * _log function
 * if __name__ == '__main__': argparsing
 
+# hyperparameters.yml
+
+* contains all hyperparameters for this
+* including env make params and training params
+
 # dqn.py
 
 * DQN class subclass nn.module
@@ -60,5 +71,6 @@ Scalability: The architecture becomes increasingly complex as the number of agen
 Project structure/steps:
 * Comment out steps for each file before coding anything
 * code experience replay and dqn and their tests before moving on to idqn
+* for everything, note down tensor shapes as they flow through the network
 * debug
 
