@@ -1,27 +1,17 @@
 
-class ReplayMemory:
-    def __init__(self, max_len, seed=None):
-        """
-        init memory as a deque with maxlen being maxlen
+from collections import deque
+import random
 
-        set seed if seed is not none
-        """
-        pass
+class ReplayMemory:
+    def __init__(self, maxlen, seed=None):
+        self.memory = deque([], maxlen=maxlen)
+        if seed is not None: random.seed(seed)
 
     def append(self, transition):
-        """
-        append to the memory a transiton
-        """
-        pass
+        self.memory.append(transition)
 
     def sample(self, sample_size):
-        """
-        return a random.sample of memory with sample_size
-        """
-        pass
+        return random.sample(self.memory, k=sample_size)
 
     def __len__(self):
-        """
-        reutnr the len of the memory — override key bc python cant natively do this
-        """
-        pass
+        return len(self.memory)
