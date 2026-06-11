@@ -1,147 +1,242 @@
 
-"""
-imports
-date format
-runs directory
-device = cpu or cuda if cuda is available
-"""
+
+import torch
+from torch import nn
+import numpy as np
+
+
+from pettingzoo.butterfly import pistonball_v6
+import pettingzoo
+
+from dqn import DQN
+from experience_replay import ReplayMemory
+
+import itertools
+import yaml
+import random
+import os
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+
+import argparse
+
+
+
+DATE_FORMAT = "%m-%d %H:%M:%S"
+
+RUNS_DIR = "runs"
+os.makedirs(RUNS_DIR, exist_ok=True)
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 
 class IDQNAgent:
-    def __init__(self, hyperparameters):
-        """
-        open hyperparameters, init them all
-        also init log model and graph dir
-        """
-        pass
+    def __init__(self, hyperparameter_set):
+        with open('hyperparameters.yml', 'r') as file:
+            all_hyperparameter_sets = yaml.safe_load(file)
+            hyperparameters = all_hyperparameter_sets[hyperparameter_set]
+        self.hyperparameter_set = hyperparameter_set
+
+        self.env_make_params = hyperparameters.get('env_make_params', {})
+
+        self.replay_memory_size = hyperparameters['replay_memory_size']
+        self.mini_batch_size = hyperparameters['mini_batch_size']
+        self.epsilon_init = hyperparameters['epsilon_init']
+        self.epsilon_decay = hyperparameters['epsilon_decay']
+        self.epsilon_min = hyperparameters['epsilon_min']
+        self.network_sync_rate = hyperparameters['network_sync_rate']
+        self.learning_rate = hyperparameters['learning_rate']
+        self.discount_factor = hyperparameters['discount_factor']
+        self.stop_on_reward = hyperparameters['stop_on_reward']
+        self.window = hyperparameters['window']
+
+        self.loss_fn = nn.MSELoss()
+
+        self.LOG_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.log')
+        self.MODEL_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.pt')
+        self.GRAPH_FILE = os.path.join(RUNS_DIR, f'{self.hyperparameter_set}.png')
 
     def train(self):
-        """
-        Create the parallel env
+        # Setup
 
-        for each agent:
-        create a q-network
-        target network (loaded from Q network)
-        optimizer (adam)
-        experience replay buffer
+        env = pistonball_v6.parallel_env(self.env_make_params, render_mode=None)
 
-        create rewards per episode
-        and mean rewards list
-        create epsilon history
-        create step count tracker and best reward is -inf
-
-        initialize epsilon to hyperparam epsilon init
-
-        for each episode in itertools.count() inf loop
-        reset the env — get the state as a tensor
-
-        set terminated and truncated to False
-        set episode reward to 0
-
-        while parallel_env.agents:
+        # Make dictionaries of the agent's policy networks, target networks, optimizers, and buffers
+        policy_networks = {}
+        target_networks = {}
+        optimizers = {}
+        exp_replay_buffers = {}
         for agent in env.agents:
-        if random.random is below epsilon, sample an action randomly for everyhting
-        and turn taht actoin to a tensor
-        else just get the action from policy dqn and no grad
-
-        out of the for gent loop, 
-        get the new state, reward, terminated, truncated, info for env.step of the actoin
-        accumulate episode reward with reward as a float
-        convert new state and reward to tensors
-
-        save expeience to memory - state, action, new state, reward, terminated all as a tuple
-        increment step
-        and make the state = new state
+            num_states = env.observation_space(agent).shape
+            num_actions = env.action_space(agent).shape[0]
+            policy_networks[agent] = DQN(num_states, num_actions).to(device)
+            target_networks[agent] = DQN(num_states, num_actions).to(device).load_state_dict(policy_networks[agent].state_dict())
+            optimizers[agent] = torch.optim.Adam(policy_networks[agent].parameters(), lr=self.learning_rate)
+            exp_replay_buffers[agent] = ReplayMemory(self.replay_memory_size)
         
-        outside of while parallel env agents:
-        append episode reward to rewards per episode
-        and get the mean reward
-        given window thing setting if window is 100
+        rewards_per_episode = []
+        mean_rewards = []
+        best_reward = float('-inf')
 
-        if episode reward is greater than best
-        update best reward, save model, log
+        epsilon = self.epsilon_init
+        epsilon_history = [self.epsilon_init]
 
-        update the graph every 10 seconds
+        step_count = 0
 
-        if the lenght of memory is greater than minibatch size
-        for each agent:
-        sample a minibatch from memory
-        optimize miibatch, polciy, and target dqn
+        # Rollout
+        for episode in itertools.count():
+            state, _ = env.reset()
+            state = torch.tensor(state, dtype=torch.float32, device=device)
+            terminated = False
+            truncated = False
+            episode_reward = 0.0
 
-        epsilon is max of epsilon decay * current epsilon and the min
-        append epsilon to epsiln hsitory
-        still inside this loop, if the step count is > than sync rate
-        copythe policy dqn to target
-        set step count to 0
+            # While agents are active
+            while env.agents:
+                # loop thru to get the actions
+                actions = {}
+                for agent in env.agents:
+                    if random.random() < epsilon:
+                        action = env.action_space.sample()
+                        action = torch.tensor(action, dtype=torch.float32, device=device)
+                        actions[agent] = action
+                    else:
+                        with torch.no_grad():
+                            # add and remove batch dim with unsqueeze & squeeze
+                            action = policy_networks[agent](state.unsqueeze(dim=0)).squeeze(dim=0).argmax()
+                            actions[agent] = action
 
-        """
-        pass
+                new_state, reward, terminated, truncated, _ = env.step(actions)
+                episode_reward += float(reward)
+                new_state = torch.tensor(new_state, dtype=torch.float, device=device)
+                reward = torch.tensor(reward, dtype=torch.float, device=device)
 
-    def optimize(self, mini_batch, policy_dqn, target_dqn):
-        """
-        Note: check the tensor shape math here
-        get states, actions, new states, rewads, and terminations from zip of mini batch
+                for agent in env.agents:
+                    exp_replay_buffers[agent].append((state, action, new_state, reward, terminated))
+                
+                step_count += 1
 
-        do torch.stack onall of them except terminations
-        for terminations make it a tensor, then .float(), then .to(device) ?
+                state = new_state
 
-        wiht no grad:
-        target_q = rewards + (1 - terminations) * self.discount_factor_g * target_dqn(new_states).max(dim=1)[0]
+            rewards_per_episode.append(episode_reward)
+            if len(rewards_per_episode) >= self.window:
+                mean_reward = np.mean(rewards_per_episode[-self.window:])
+            else:
+                mean_reward = np.mean(rewards_per_episode)
+            mean_rewards.append(mean_reward)
+            
+            if episode_reward > best_reward:
+                log_message = (f"{datetime.now().strftime(DATE_FORMAT)}: Episode {episode} | New best mean reward: {mean_reward:.5f}")
+                self._log(log_message)
+                best_reward = episode_reward
+                save_model(policy_networks)
+            
+            current_time = datetime.now()
+            if (current_time - last_graph_update_time) > timedelta(seconds=10):
+                self.save_graph(rewards_per_episode, epsilon_history)
+                last_graph_update_time = current_time
+            
+            for agent in env.agents:
+                if len(exp_replay_buffers[agent]) > self.mini_batch_size:
+                    mini_batch = exp_replay_buffers[agent].sample(self.mini_batch_size)
+                    self.optimize(mini_batch, policy_networks[agent], target_networks[agent], optimizers[agent])
+                    
+                    epsilon = max(epsilon * self.epsilon_decay, self.epsilon_min)
+                    epsilon_history.append(epsilon)
 
-        find current q from policy network
+                    if step_count > self.network_sync_rate:
+                        target_networks[agent].load_state_dict(policy_networks[agent].state_dict())
+                        step_count = 0
 
+    def optimize(self, mini_batch, policy_dqn, target_dqn, optimizer):
+        states, actions, new_states, rewards, terminations = zip(*mini_batch)
+        states = torch.stack(states)
+        actions = torch.stack(actions)
+        new_states = torch.stack(new_states)
+        rewards = torch.stack(rewards)
+        terminations = torch.tensor(terminations).float().to(device)
+
+        with torch.no_grad():
+            target_q = rewards + (1 - terminations) * self.discount_factor * target_dqn(new_states).max(dim=1)[0]
         current_q = policy_dqn(states).gather(dim=1, index=actions.unsqueeze(dim=1)).squeeze(dim=1)
 
-        find loss using self.loss_fn (MSE loss)
-
-        optimize the model with self.optimizer
-        zero grad
-        loss backward
-        step
-        """
-        pass
+        loss = self.loss_fn(current_q, target_q)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
     def run(self):
-        """
-        create the parallel environment
+        env = pistonball_v6.parallel_env(self.env_make_params, render_mode='human')
 
-        create the policy network
-        load it
-        .eval it
+        policy_networks = {}
+        for agent in env.agents:
+            num_states = env.observation_space(agent).shape
+            num_actions = env.action_space(agent).shape[0]
+            policy_networks[agent] = DQN(num_states, num_actions).to(device)
+            policy_networks[agent].eval()
+        load_model(policy_networks)
 
-        reset it
+        state, _ = env.reset()
+        state = torch.tensor(state, dtype=torch.float, device=device)
 
-        with inference mode
-        while parallel_env.agents:
-            insert the policy to get the actoin
-            for each agent we create a dictoinary of the actions
-            then parallel_env.step()
-        
-        parallel_env.close()
-
-        """
-        pass
+        for _ in itertools.count(): # loop the run infinitely for funsies
+            with torch.inference_mode():
+                while env.agents:
+                    # get action
+                    actions = {}
+                    for agent in env.agents:
+                        if agent in terminations and (terminations[agent] or truncations[agent]):
+                            actions[agent] = None
+                        else:
+                            actions[agent] = policy_networks[agent](state)
+                    
+                    state, rewards, terminations, truncations, infos = env.step(actions)
+                    state = torch.tensor(state, dtype=torch.float, device=device)
+        env.close()
 
     def save_graph(self, mean_rewards, epsilon_history):
-        """
-        We plot both epsilon decay and the mean rewards stuff
+        plt.subplot(1, 2, 1)
+        plt.xlabel('Episodes')
+        plt.ylabel('Mean rewards')
+        plt.plot(mean_rewards)
 
-        create episodes vs mean rewards plot
+        plt.subplot(1, 2, 2)
+        plt.xlabel('Time steps')
+        plt.ylabel('Epsilon Decay')
+        plt.plot(epsilon_history)
 
-        create time steps vs epsilon decay plot
+        plt.subplots_adjust(wspace=1.0, hspace=1.0)
 
-        save plots to graph file
-        close plots
-
-        """
-        pass
+        plt.savefig(self.GRAPH_FILE)
+        plt.close()
 
     def _log(self, msg):
         print(msg)
         with open(self.LOG_FILE, 'a') as f:
             f.write(msg + '\n')
+    
+def save_model(policy_networks, filepath="best.pt"):
+    checkpoint = {}
+    for agent, network in policy_networks.items():
+        checkpoint[f"{agent}_state"] = network.state_dict()
+    torch.save(checkpoint, filepath)
+
+def load_model(policy_networks, filepath="best.pt"):
+    if os.path.exists(filepath):
+        checkpoint = torch.load(filepath)
+        for agent, network in policy_networks.items():
+            network.load_state_dict(checkpoint[f"{agent}_state"])
 
 if __name__ == '__main__':
-    """
-    argparsing for --train and the hyperparameter sets
-    """
-    pass
+    # Parse command line inputs
+    parser = argparse.ArgumentParser(description='Train or test model.')
+    parser.add_argument('hyperparameters', help='')
+    parser.add_argument('--train', help='Training mode', action='store_true')
+    args = parser.parse_args()
+
+    idqn = IDQNAgent(hyperparameter_set=args.hyperparameters)
+
+    if args.train:
+        idqn.train()
+    else:
+        idqn.run()

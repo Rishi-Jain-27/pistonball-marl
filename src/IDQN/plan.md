@@ -8,6 +8,7 @@ Extension later: vectorized envs
 extensions: dueling and double dqn
 extensoin: parameter sharing
 parallel envs bc this is not a turn based game
+dynamic experience replay
 
 - Create single agent DQN
 Because I-DQN runs a standard DQN for each agent, the core algorithm remains the same for every independent learner.
