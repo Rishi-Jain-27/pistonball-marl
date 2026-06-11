@@ -1,4 +1,4 @@
-# Debug this later
+# Fix CUDA OOM errors from this
 
 import torch
 from torch import nn
@@ -93,7 +93,7 @@ class IDQNAgent:
         for episode in itertools.count():
             state, _ = env.reset()
             # state is a dict
-            state = {agent: torch.tensor(agent_state, dtype=torch.float, device=device) for agent, agent_state in state.items()}
+            state = {agent: torch.tensor(agent_state, dtype=torch.float) for agent, agent_state in state.items()}
             terminated = False
             truncated = False
             episode_reward = 0.0
@@ -109,13 +109,13 @@ class IDQNAgent:
                     else:
                         with torch.no_grad():
                             # add and remove batch dim with unsqueeze & squeeze
-                            action = policy_networks[agent](state[agent].unsqueeze(dim=0)).squeeze(dim=0).argmax().item()
+                            action = policy_networks[agent](state[agent].unsqueeze(dim=0).to(device)).squeeze(dim=0).argmax().item()
                             actions[agent] = action
 
                 new_state, reward, terminated, truncated, _ = env.step(actions)
                 episode_reward += sum(reward.values())/len(reward) # average across agents
-                new_state = {agent: torch.tensor(new_agent_state, dtype=torch.float, device=device) for agent, new_agent_state in new_state.items()}
-                reward = {agent: torch.tensor(agent_reward, dtype=torch.float, device=device) for agent, agent_reward in reward.items()}
+                new_state = {agent: torch.tensor(new_agent_state, dtype=torch.float) for agent, new_agent_state in new_state.items()}
+                reward = {agent: torch.tensor(agent_reward, dtype=torch.float) for agent, agent_reward in reward.items()}
 
                 for agent in agents_list:
                     exp_replay_buffers[agent].append((state[agent], actions[agent], new_state[agent], reward[agent], terminated[agent]))
@@ -163,13 +163,13 @@ class IDQNAgent:
 
     def optimize(self, mini_batch, policy_dqn, target_dqn, optimizer):
         states, actions, new_states, rewards, terminations = zip(*mini_batch)
-        states = torch.stack(states)
+        states = torch.stack(states).to(device)
 
         # actions are ints, this stacks them to (B,) either way
         actions = torch.tensor(actions, dtype=torch.long, device=device) # long bc gather needs it
 
-        new_states = torch.stack(new_states)
-        rewards = torch.stack(rewards)
+        new_states = torch.stack(new_states).to(device)
+        rewards = torch.stack(rewards).to(device)
         terminations = torch.tensor(terminations).float().to(device)
 
         with torch.no_grad():
