@@ -1,4 +1,4 @@
-
+# Debug this later
 
 import torch
 from torch import nn
@@ -6,7 +6,6 @@ import numpy as np
 
 
 from pettingzoo.butterfly import pistonball_v6
-import pettingzoo
 
 from dqn import DQN
 from experience_replay import ReplayMemory
@@ -32,7 +31,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class IDQNAgent:
     def __init__(self, hyperparameter_set):
-        with open('hyperparameters.yml', 'r') as file:
+        with open('src/IDQN/hyperparameters.yml', 'r') as file:
             all_hyperparameter_sets = yaml.safe_load(file)
             hyperparameters = all_hyperparameter_sets[hyperparameter_set]
         self.hyperparameter_set = hyperparameter_set
@@ -59,7 +58,8 @@ class IDQNAgent:
     def train(self):
         # Setup
 
-        env = pistonball_v6.parallel_env(self.env_make_params, render_mode=None)
+        env = pistonball_v6.parallel_env(**self.env_make_params, render_mode=None)
+        env.reset()
 
         # Make dictionaries of the agent's policy networks, target networks, optimizers, and buffers
         policy_networks = {}
@@ -68,12 +68,14 @@ class IDQNAgent:
         exp_replay_buffers = {}
         for agent in env.agents:
             num_states = env.observation_space(agent).shape
-            num_actions = env.action_space(agent).shape[0]
+            num_actions = env.action_space(agent).n
             policy_networks[agent] = DQN(num_states, num_actions).to(device)
-            target_networks[agent] = DQN(num_states, num_actions).to(device).load_state_dict(policy_networks[agent].state_dict())
+            target_networks[agent] = DQN(num_states, num_actions).to(device)
+            target_networks[agent].load_state_dict(policy_networks[agent].state_dict())
             optimizers[agent] = torch.optim.Adam(policy_networks[agent].parameters(), lr=self.learning_rate)
             exp_replay_buffers[agent] = ReplayMemory(self.replay_memory_size)
         
+        # Misc rollout-relevant things
         rewards_per_episode = []
         mean_rewards = []
         best_reward = float('-inf')
@@ -83,10 +85,15 @@ class IDQNAgent:
 
         step_count = 0
 
+        last_graph_update_time = datetime.now()
+
+        agents_list = env.possible_agents
+
         # Rollout
         for episode in itertools.count():
             state, _ = env.reset()
-            state = torch.tensor(state, dtype=torch.float32, device=device)
+            # state is a dict
+            state = {agent: torch.tensor(agent_state, dtype=torch.float, device=device) for agent, agent_state in state.items()}
             terminated = False
             truncated = False
             episode_reward = 0.0
@@ -97,26 +104,24 @@ class IDQNAgent:
                 actions = {}
                 for agent in env.agents:
                     if random.random() < epsilon:
-                        action = env.action_space.sample()
-                        action = torch.tensor(action, dtype=torch.float32, device=device)
+                        action = env.action_space(agent).sample()
                         actions[agent] = action
                     else:
                         with torch.no_grad():
                             # add and remove batch dim with unsqueeze & squeeze
-                            action = policy_networks[agent](state.unsqueeze(dim=0)).squeeze(dim=0).argmax()
+                            action = policy_networks[agent](state[agent].unsqueeze(dim=0)).squeeze(dim=0).argmax().item()
                             actions[agent] = action
 
                 new_state, reward, terminated, truncated, _ = env.step(actions)
-                episode_reward += float(reward)
-                new_state = torch.tensor(new_state, dtype=torch.float, device=device)
-                reward = torch.tensor(reward, dtype=torch.float, device=device)
+                episode_reward += sum(reward.values())/len(reward) # average across agents
+                new_state = {agent: torch.tensor(new_agent_state, dtype=torch.float, device=device) for agent, new_agent_state in new_state.items()}
+                reward = {agent: torch.tensor(agent_reward, dtype=torch.float, device=device) for agent, agent_reward in reward.items()}
 
-                for agent in env.agents:
-                    exp_replay_buffers[agent].append((state, action, new_state, reward, terminated))
+                for agent in agents_list:
+                    exp_replay_buffers[agent].append((state[agent], actions[agent], new_state[agent], reward[agent], terminated[agent]))
+                    state[agent] = new_state[agent]
                 
                 step_count += 1
-
-                state = new_state
 
             rewards_per_episode.append(episode_reward)
             if len(rewards_per_episode) >= self.window:
@@ -125,33 +130,44 @@ class IDQNAgent:
                 mean_reward = np.mean(rewards_per_episode)
             mean_rewards.append(mean_reward)
             
-            if episode_reward > best_reward:
+            if mean_reward > best_reward:
                 log_message = (f"{datetime.now().strftime(DATE_FORMAT)}: Episode {episode} | New best mean reward: {mean_reward:.5f}")
                 self._log(log_message)
-                best_reward = episode_reward
-                save_model(policy_networks)
+                best_reward = mean_reward
+                save_model(policy_networks, self.MODEL_FILE)
+            
+            if mean_reward > self.stop_on_reward:
+                log_message = (f"Solved! Reward: {episode_reward}")
+                self._log(log_message)
+                # saving here would be redundant
+                break
             
             current_time = datetime.now()
             if (current_time - last_graph_update_time) > timedelta(seconds=10):
                 self.save_graph(rewards_per_episode, epsilon_history)
                 last_graph_update_time = current_time
             
-            for agent in env.agents:
+            for agent in agents_list:
                 if len(exp_replay_buffers[agent]) > self.mini_batch_size:
                     mini_batch = exp_replay_buffers[agent].sample(self.mini_batch_size)
                     self.optimize(mini_batch, policy_networks[agent], target_networks[agent], optimizers[agent])
                     
-                    epsilon = max(epsilon * self.epsilon_decay, self.epsilon_min)
-                    epsilon_history.append(epsilon)
+            epsilon = max(epsilon * self.epsilon_decay, self.epsilon_min)
+            epsilon_history.append(epsilon)
 
-                    if step_count > self.network_sync_rate:
-                        target_networks[agent].load_state_dict(policy_networks[agent].state_dict())
-                        step_count = 0
+            if step_count > self.network_sync_rate:
+                for agent in agents_list:
+                    target_networks[agent].load_state_dict(policy_networks[agent].state_dict())
+                step_count = 0
+            
 
     def optimize(self, mini_batch, policy_dqn, target_dqn, optimizer):
         states, actions, new_states, rewards, terminations = zip(*mini_batch)
         states = torch.stack(states)
-        actions = torch.stack(actions)
+
+        # actions are ints, this stacks them to (B,) either way
+        actions = torch.tensor(actions, dtype=torch.long, device=device) # long bc gather needs it
+
         new_states = torch.stack(new_states)
         rewards = torch.stack(rewards)
         terminations = torch.tensor(terminations).float().to(device)
@@ -166,18 +182,23 @@ class IDQNAgent:
         optimizer.step()
 
     def run(self):
-        env = pistonball_v6.parallel_env(self.env_make_params, render_mode='human')
+        env = pistonball_v6.parallel_env(**self.env_make_params, render_mode='human')
+        env.reset()
 
         policy_networks = {}
+        terminations = {}
+        truncations = {}
         for agent in env.agents:
             num_states = env.observation_space(agent).shape
-            num_actions = env.action_space(agent).shape[0]
+            num_actions = env.action_space(agent).n
             policy_networks[agent] = DQN(num_states, num_actions).to(device)
             policy_networks[agent].eval()
-        load_model(policy_networks)
+            terminations[agent] = False
+            truncations[agent] = False
+        load_model(policy_networks, self.MODEL_FILE)
 
         state, _ = env.reset()
-        state = torch.tensor(state, dtype=torch.float, device=device)
+        state = {agent: torch.tensor(agent_state, dtype=torch.float, device=device) for agent, agent_state in state.items()}
 
         for _ in itertools.count(): # loop the run infinitely for funsies
             with torch.inference_mode():
@@ -188,10 +209,10 @@ class IDQNAgent:
                         if agent in terminations and (terminations[agent] or truncations[agent]):
                             actions[agent] = None
                         else:
-                            actions[agent] = policy_networks[agent](state)
+                            actions[agent] = policy_networks[agent](state[agent].unsqueeze(dim=0)).argmax().item() # this is ok bc batch = 1 afterwards
                     
                     state, rewards, terminations, truncations, infos = env.step(actions)
-                    state = torch.tensor(state, dtype=torch.float, device=device)
+                    state = {agent: torch.tensor(agent_state, dtype=torch.float, device=device) for agent, agent_state in state.items()}
         env.close()
 
     def save_graph(self, mean_rewards, epsilon_history):
