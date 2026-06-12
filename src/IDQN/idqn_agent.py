@@ -1,4 +1,27 @@
-# Fix CUDA OOM errors from this
+
+"""
+To train on Colab A100s:
+gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory
+colab whoami
+colab new -s idqn --gpu A100
+cd /Users/rishijain/Documents/pistonball-marl
+tar czf /tmp/idqn.tgz src requirements.txt
+colab upload -s idqn /tmp/idqn.tgz /content/idqn.tgz
+echo "import tarfile,os; os.makedirs('/content/pistonball-marl',exist_ok=True); tarfile.open('/content/idqn.tgz').extractall('/content/pistonball-marl')" | colab exec -s idqn
+colab install -s idqn -r requirements.txt
+cat > /tmp/run_idqn.py <<'EOF'
+import os, sys
+os.chdir('/content/pistonball-marl')
+sys.path.insert(0, 'src/IDQN')
+from idqn_agent import IDQNAgent
+IDQNAgent('idqnpistonball_1').train()
+EOF
+colab exec -s idqn -f /tmp/run_idqn.py
+colab download -s idqn /content/pistonball-marl/runs/idqnpistonball_1.pt  ./runs/
+colab download -s idqn /content/pistonball-marl/runs/idqnpistonball_1.log ./runs/
+colab download -s idqn /content/pistonball-marl/runs/idqnpistonball_1.png ./runs/
+colab stop -s idqn
+"""
 
 import torch
 from torch import nn
